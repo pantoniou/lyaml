@@ -28,9 +28,8 @@
 
 typedef struct {
    lua_State	 *L;
-   yaml_parser_t  parser;
-   yaml_token_t	  token;
-   char		  validtoken;
+   struct fy_parser *parser;
+   struct fy_token *token;
    int		  document_count;
 } lyaml_scanner;
 
@@ -38,22 +37,23 @@ typedef struct {
 static void
 scanner_delete_token (lyaml_scanner *scanner)
 {
-   if (scanner->validtoken)
+   if (scanner->token)
    {
-      yaml_token_delete (&scanner->token);
-      scanner->validtoken = 0;
+      fy_scan_token_free (scanner->parser, scanner->token);
+      scanner->token = NULL;
    }
 }
 
 /* With the token result table on the top of the stack, insert
    a mark entry. */
 static void
-scanner_set_mark (lua_State *L, const char *k, yaml_mark_t mark)
+scanner_set_mark (lua_State *L, const char *k, const struct fy_mark *mark)
 {
    lua_pushstring  (L, k);
    lua_createtable (L, 0, 3);
-#define MENTRY(_s)	RAWSET_INTEGER (#_s, mark._s)
-         MENTRY( index	);
+#define MENTRY(_s)	RAWSET_INTEGER (#_s, mark->_s)
+         RAWSET_INTEGER( "index", mark->input_pos);
+         // MENTRY( index	);
          MENTRY( line	);
          MENTRY( column	);
 #undef MENTRY
@@ -69,43 +69,30 @@ scanner_push_tokentable (lyaml_scanner *scanner, const char *v, int n)
    lua_createtable (L, 0, n + 3);
    RAWSET_STRING   ("type", v);
 
-#define MENTRY(_s)	scanner_set_mark (L, #_s, scanner->token._s)
+#define MENTRY(_s)	scanner_set_mark (L, #_s, fy_token_ ## _s (scanner->token))
          MENTRY( start_mark	);
-         MENTRY( end_mark	);
+         MENTRY( end_mark	   );
 #undef MENTRY
 }
 
 static void
 scan_STREAM_START (lyaml_scanner *scanner)
 {
-#define EVENTF(_f)	(scanner->token.data.stream_start._f)
    lua_State *L = scanner->L;
-   const char *encoding;
-
-   switch (EVENTF (encoding))
-   {
-#define MENTRY(_s)		\
-      case YAML_##_s##_ENCODING: encoding = #_s; break
-         MENTRY( UTF8		);
-         MENTRY( UTF16LE	);
-         MENTRY( UTF16BE	);
-#undef MENTRY
-
-      default:
-         lua_pushfstring (L, "invalid encoding %d", EVENTF (encoding));
-         lua_error (L);
-   }
 
    scanner_push_tokentable (scanner, "STREAM_START", 1);
-   RAWSET_STRING ("encoding", encoding);
-#undef EVENTF
+   RAWSET_STRING ("encoding", "UTF8"); /* libfyaml only does UTF8 */
 }
 
 static void
 scan_VERSION_DIRECTIVE (lyaml_scanner *scanner)
 {
-#define EVENTF(_f)	(scanner->token.data.version_directive._f)
+   const struct fy_version *vers;
    lua_State *L = scanner->L;
+
+   vers = fy_version_directive_token_version(scanner->token);
+
+#define EVENTF(_f)	(vers->_f)
 
    scanner_push_tokentable (scanner, "VERSION_DIRECTIVE", 2);
 
@@ -119,7 +106,10 @@ scan_VERSION_DIRECTIVE (lyaml_scanner *scanner)
 static void
 scan_TAG_DIRECTIVE (lyaml_scanner *scanner)
 {
-#define EVENTF(_f)	(scanner->token.data.tag_directive._f)
+   const char *handle = fy_tag_directive_token_handle0(scanner->token);
+   const char *prefix = fy_tag_directive_token_prefix0(scanner->token);
+
+#define EVENTF(_f)	(_f)
    lua_State *L = scanner->L;
 
    scanner_push_tokentable (scanner, "TAG_DIRECTIVE", 2);
@@ -131,7 +121,8 @@ scan_TAG_DIRECTIVE (lyaml_scanner *scanner)
 static void
 scan_ALIAS (lyaml_scanner *scanner)
 {
-#define EVENTF(_f)	(scanner->token.data.alias._f)
+   const char *value = fy_token_get_text0(scanner->token);
+#define EVENTF(_f)	(_f)
    lua_State *L = scanner->L;
 
    scanner_push_tokentable (scanner, "ALIAS", 1);
@@ -142,7 +133,8 @@ scan_ALIAS (lyaml_scanner *scanner)
 static void
 scan_ANCHOR (lyaml_scanner *scanner)
 {
-#define EVENTF(_f)	(scanner->token.data.anchor._f)
+   const char *value = fy_token_get_text0(scanner->token);
+#define EVENTF(_f)	(_f)
    lua_State *L = scanner->L;
 
    scanner_push_tokentable (scanner, "ANCHOR", 1);
@@ -153,7 +145,9 @@ scan_ANCHOR (lyaml_scanner *scanner)
 static void
 scan_TAG(lyaml_scanner *scanner)
 {
-#define EVENTF(_f)	(scanner->token.data.tag._f)
+   const char *handle = fy_tag_token_handle0(scanner->token);
+   const char *suffix = fy_tag_token_suffix0(scanner->token);
+#define EVENTF(_f)	(_f)
    lua_State *L = scanner->L;
 
    scanner_push_tokentable (scanner, "TAG", 2);
@@ -165,14 +159,17 @@ scan_TAG(lyaml_scanner *scanner)
 static void
 scan_SCALAR (lyaml_scanner *scanner)
 {
-#define EVENTF(_f)	(scanner->token.data.scalar._f)
+   size_t length;
+   const char *value = fy_token_get_text(scanner->token, &length);
+   enum fy_scalar_style ss = fy_token_scalar_style(scanner->token);
+#define EVENTF(_f)	(_f)
    lua_State *L = scanner->L;
    const char *style;
 
-   switch (EVENTF (style))
+   switch (EVENTF (ss))
    {
 #define MENTRY(_s)		\
-      case YAML_##_s##_SCALAR_STYLE: style = #_s; break
+      case FYSS_##_s : style = #_s; break
 
         MENTRY( PLAIN		);
         MENTRY( SINGLE_QUOTED	);
@@ -196,15 +193,20 @@ scan_SCALAR (lyaml_scanner *scanner)
 static void
 scanner_generate_error_message (lyaml_scanner *scanner)
 {
-   yaml_parser_t *P = &scanner->parser;
+   struct fy_parser *P = scanner->parser;
    char buf[256];
    luaL_Buffer b;
 
    luaL_buffinit (scanner->L, &b);
+#if 0
    luaL_addstring (&b, P->problem ? P->problem : "A problem");
+#else
+   luaL_addstring (&b, "A problem");
+#endif
    snprintf (buf, sizeof (buf), " at document: %d", scanner->document_count);
    luaL_addstring (&b, buf);
 
+#if 0
    if (P->problem_mark.line || P->problem_mark.column)
    {
       snprintf (buf, sizeof (buf), ", line: %lu, column: %lu",
@@ -222,6 +224,7 @@ scanner_generate_error_message (lyaml_scanner *scanner)
          (unsigned long) P->context_mark.column + 1);
       luaL_addstring (&b, buf);
    }
+#endif
 
    luaL_pushresult (&b);
 }
@@ -233,22 +236,21 @@ token_iter (lua_State *L)
    char *str;
 
    scanner_delete_token (scanner);
-   if (yaml_parser_scan (&scanner->parser, &scanner->token) != 1)
+   scanner->token = fy_scan(scanner->parser);
+   if (!scanner->token)
    {
       scanner_generate_error_message (scanner);
       return lua_error (L);
    }
 
-   scanner->validtoken = 1;
-
    lua_newtable    (L);
    lua_pushliteral (L, "type");
 
-   switch (scanner->token.type)
+   switch (fy_token_get_type(scanner->token))
    {
       /* First the simple tokens, generated right here... */
 #define MENTRY(_s)			\
-      case YAML_##_s##_TOKEN: scanner_push_tokentable (scanner, #_s, 0); break
+      case FYTT_##_s : scanner_push_tokentable (scanner, #_s, 0); break
          MENTRY( STREAM_END		);
          MENTRY( DOCUMENT_START		);
          MENTRY( DOCUMENT_END		);
@@ -267,7 +269,7 @@ token_iter (lua_State *L)
 
       /* ...then the complex tokens, generated by a function call. */
 #define MENTRY(_s)		\
-      case YAML_##_s##_TOKEN: scan_##_s (scanner); break
+      case FYTT_##_s : scan_##_s (scanner); break
          MENTRY( STREAM_START		);
 	 MENTRY( VERSION_DIRECTIVE	);
 	 MENTRY( TAG_DIRECTIVE		);
@@ -277,11 +279,11 @@ token_iter (lua_State *L)
          MENTRY( SCALAR			);
 #undef MENTRY
 
-      case YAML_NO_TOKEN:
+      case FYTT_NONE:
          lua_pushnil (L);
          break;
       default:
-         lua_pushfstring  (L, "invalid token %d", scanner->token.type);
+         lua_pushfstring  (L, "invalid token %d", fy_token_get_type(scanner->token));
          return lua_error (L);
    }
 
@@ -296,7 +298,8 @@ scanner_gc (lua_State *L)
    if (scanner)
    {
       scanner_delete_token (scanner);
-      yaml_parser_delete (&scanner->parser);
+      if (scanner->parser)
+         fy_parser_destroy(scanner->parser);
    }
    return 0;
 }
@@ -329,9 +332,10 @@ Pscanner (lua_State *L)
    lua_setmetatable  (L, -2);
 
    /* try to initialize the scanner */
-   if (yaml_parser_initialize (&scanner->parser) == 0)
+   scanner->parser == fy_parser_create(NULL);
+   if (!scanner->parser)
       luaL_error (L, "cannot initialize parser for %s", str);
-   yaml_parser_set_input_string (&scanner->parser, str, lua_strlen (L, 1));
+   fy_parser_set_string(scanner->parser, str, lua_strlen (L, 1));
 
    /* create and return the iterator function, with the loader userdatum as
       its sole upvalue */

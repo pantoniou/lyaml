@@ -27,9 +27,8 @@
 
 typedef struct {
    lua_State	 *L;
-   yaml_parser_t  parser;
-   yaml_event_t	  event;
-   char		  validevent;
+   struct fy_parser *parser;
+   struct fy_event *event;
    int		  document_count;
 } lyaml_parser;
 
@@ -37,22 +36,23 @@ typedef struct {
 static void
 parser_delete_event (lyaml_parser *parser)
 {
-   if (parser->validevent)
+   if (parser->event)
    {
-      yaml_event_delete (&parser->event);
-      parser->validevent = 0;
+      fy_parser_event_free(parser->parser, parser->event);
+      parser->event = NULL;
    }
 }
 
 /* With the event result table on the top of the stack, insert
    a mark entry. */
 static void
-parser_set_mark (lua_State *L, const char *k, yaml_mark_t mark)
+parser_set_mark (lua_State *L, const char *k, const struct fy_mark *mark)
 {
    lua_pushstring  (L, k);
    lua_createtable (L, 0, 3);
-#define MENTRY(_s)	RAWSET_INTEGER(#_s, mark._s)
-        MENTRY( index	);
+#define MENTRY(_s)	RAWSET_INTEGER(#_s, mark ? mark->_s : 0)
+        RAWSET_INTEGER( "index", mark ? mark->input_pos : 0);
+        // MENTRY( index	);
         MENTRY( line	);
         MENTRY( column	);
 #undef MENTRY
@@ -67,7 +67,7 @@ parser_push_eventtable (lyaml_parser *parser, const char *v, int n)
 
    lua_createtable (L, 0, n + 3);
    RAWSET_STRING   ("type", v);
-#define MENTRY(_s)	parser_set_mark (L, #_s, parser->event._s)
+#define MENTRY(_s)	parser_set_mark (L, #_s, fy_event_ ## _s (parser->event))
         MENTRY( start_mark	);
         MENTRY( end_mark	);
 #undef MENTRY
@@ -78,46 +78,22 @@ parse_STREAM_START (lyaml_parser *parser)
 {
 #define EVENTF(_f)	(parser->event.data.stream_start._f)
    lua_State *L = parser->L;
-   const char *encoding;
-
-   switch (EVENTF (encoding))
-   {
-#define MENTRY(_s)		\
-      case YAML_##_s##_ENCODING: encoding = #_s; break
-
-        MENTRY( ANY	);
-        MENTRY( UTF8	);
-        MENTRY( UTF16LE	);
-        MENTRY( UTF16BE	);
-#undef MENTRY
-
-      default:
-         lua_pushfstring (L, "invalid encoding %d", EVENTF (encoding));
-         lua_error (L);
-   }
 
    parser_push_eventtable (parser, "STREAM_START", 1);
-   RAWSET_STRING ("encoding", encoding);
+   RAWSET_STRING ("encoding", "UTF8");	/* libfyaml only supports UTF8 */
 #undef EVENTF
-}
-
-/* With the tag list on the top of the stack, append TAG. */
-static void
-parser_append_tag (lua_State *L, yaml_tag_directive_t tag)
-{
-   lua_createtable (L, 0, 2);
-#define MENTRY(_s)	RAWSET_STRING(#_s, tag._s)
-        MENTRY( handle	);
-        MENTRY( prefix	);
-#undef MENTRY
-   lua_rawseti (L, -2, lua_objlen (L, -2) + 1);
 }
 
 static void
 parse_DOCUMENT_START (lyaml_parser *parser)
 {
-#define EVENTF(_f)	(parser->event.data.document_start._f)
+#define EVENTF(_f)	(parser->event->document_start._f)
    lua_State *L = parser->L;
+   struct fy_document_state *fyds;
+   const struct fy_version *version;
+   const struct fy_tag *tag;
+   void *iter;
+   bool first;
 
    /* increment document count */
    parser->document_count++;
@@ -126,39 +102,42 @@ parse_DOCUMENT_START (lyaml_parser *parser)
    RAWSET_BOOLEAN ("implicit", EVENTF (implicit));
 
    /* version_directive = { major = M, minor = N } */
-   if (EVENTF (version_directive))
+   version = fy_document_start_event_version(parser->event);
+   if (version)
    {
       lua_pushliteral (L, "version_directive");
       lua_createtable (L, 0, 2);
-#define MENTRY(_s)	RAWSET_INTEGER(#_s, EVENTF (version_directive->_s))
+#define MENTRY(_s)	RAWSET_INTEGER(#_s, version->_s)
         MENTRY( major	);
         MENTRY( minor	);
 #undef MENTRY
       lua_rawset (L, -3);
    }
 
-   /* tag_directives = { {handle = H1, prefix = P1}, ... } */
-   if (EVENTF (tag_directives.start) &&
-       EVENTF (tag_directives.end)) {
-      yaml_tag_directive_t *cur;
-
-      lua_pushliteral (L, "tag_directives");
-      lua_newtable (L);
-      for (cur = EVENTF (tag_directives.start);
-           cur != EVENTF (tag_directives.end);
-           cur = cur + 1)
-      {
-         parser_append_tag (L, *cur);
-      }
+	fyds = parser->event->document_start.document_state;
+   iter = NULL;
+	if ((tag = fy_document_state_tag_directive_iterate(fyds, &iter)) != NULL)
+	{
+		lua_pushliteral (L, "tag_directives");
+		lua_newtable (L);
+		do {
+   		lua_createtable (L, 0, 2);
+#define MENTRY(_s)	RAWSET_STRING(#_s, tag->_s)
+			MENTRY( handle	);
+			MENTRY( prefix	);
+#undef MENTRY
+			lua_rawseti (L, -2, lua_objlen (L, -2) + 1);
+		} while ((tag = fy_document_state_tag_directive_iterate(fyds, &iter)) != NULL);
       lua_rawset (L, -3);
-   }
+	}
+
 #undef EVENTF
 }
 
 static void
 parse_DOCUMENT_END (lyaml_parser *parser)
 {
-#define EVENTF(_f)	(parser->event.data.document_end._f)
+#define EVENTF(_f)	(parser->event->document_end._f)
    lua_State *L = parser->L;
 
    parser_push_eventtable (parser, "DOCUMENT_END", 1);
@@ -169,9 +148,15 @@ parse_DOCUMENT_END (lyaml_parser *parser)
 static void
 parse_ALIAS (lyaml_parser *parser)
 {
-#define EVENTF(_f)	(parser->event.data.alias._f)
+#define EVENTF(_f)	(_f)
    lua_State *L = parser->L;
+	const char *anchor;
 
+	anchor = fy_token_get_text0(parser->event->alias.anchor);
+	if (!anchor) {
+         lua_pushfstring (L, "fy_token_get_text0() failed");
+         lua_error (L);
+	}
    parser_push_eventtable (parser, "ALIAS", 1);
    RAWSET_EVENTF (anchor);
 #undef EVENTF
@@ -180,14 +165,19 @@ parse_ALIAS (lyaml_parser *parser)
 static void
 parse_SCALAR (lyaml_parser *parser)
 {
-#define EVENTF(_f)	(parser->event.data.scalar._f)
+#define EVENTF(_f)	(_f)
    lua_State *L = parser->L;
    const char *style;
+	const char *anchor;
+	const char *tag;
+	const char *value;
+	enum fy_scalar_style sstyle;
 
-   switch (EVENTF (style))
+	sstyle = fy_token_scalar_style(parser->event->scalar.value);
+   switch (sstyle)
    {
 #define MENTRY(_s)		\
-      case YAML_##_s##_SCALAR_STYLE: style = #_s; break
+      case FYSS_##_s: style = #_s; break
 
         MENTRY( ANY		);
         MENTRY( PLAIN		);
@@ -198,18 +188,27 @@ parse_SCALAR (lyaml_parser *parser)
 #undef MENTRY
 
       default:
-         lua_pushfstring (L, "invalid sequence style %d", EVENTF (style));
+         lua_pushfstring (L, "invalid sequence style %d", EVENTF (sstyle));
          lua_error (L);
    }
 
+	anchor = fy_token_get_text0(parser->event->scalar.anchor);
+	if (!anchor)
+		anchor = "";
+	tag = fy_token_get_text0(parser->event->scalar.tag);
+	if (!tag)
+		tag = "";
+	value = fy_token_get_text0(parser->event->scalar.value);
+	if (!value)
+		value = "";
 
    parser_push_eventtable (parser, "SCALAR", 6);
    RAWSET_EVENTF (anchor);
    RAWSET_EVENTF (tag);
    RAWSET_EVENTF (value);
 
-   RAWSET_BOOLEAN ("plain_implicit", EVENTF (plain_implicit));
-   RAWSET_BOOLEAN ("quoted_implicit", EVENTF (quoted_implicit));
+   RAWSET_BOOLEAN ("plain_implicit", false);	/* those two are not in fyaml */
+   RAWSET_BOOLEAN ("quoted_implicit", false);
    RAWSET_STRING  ("style", style);
 #undef EVENTF
 }
@@ -217,14 +216,19 @@ parse_SCALAR (lyaml_parser *parser)
 static void
 parse_SEQUENCE_START (lyaml_parser *parser)
 {
-#define EVENTF(_f)	(parser->event.data.sequence_start._f)
+#define EVENTF(_f)	(_f)
    lua_State *L = parser->L;
+	enum fy_node_style nstyle;
+	const char *anchor;
+	const char *tag;
+	bool implicit;
    const char *style;
 
-   switch (EVENTF (style))
+	nstyle = fy_event_get_node_style(parser->event);
+   switch (nstyle)
    {
 #define MENTRY(_s)		\
-      case YAML_##_s##_SEQUENCE_STYLE: style = #_s; break
+      case FYNS_##_s : style = #_s; break
 
         MENTRY( ANY	);
         MENTRY( BLOCK	);
@@ -232,9 +236,17 @@ parse_SEQUENCE_START (lyaml_parser *parser)
 #undef MENTRY
 
       default:
-         lua_pushfstring (L, "invalid sequence style %d", EVENTF (style));
+         lua_pushfstring (L, "invalid sequence style %d", nstyle);
          lua_error (L);
    }
+
+	anchor = fy_token_get_text0(parser->event->sequence_start.anchor);
+	if (!anchor)
+		anchor = "";
+	tag = fy_token_get_text0(parser->event->sequence_start.tag);
+	if (!tag)
+		tag = "";
+   implicit = parser->event->sequence_start.sequence_start == NULL;	
 
    parser_push_eventtable (parser, "SEQUENCE_START", 4);
    RAWSET_EVENTF (anchor);
@@ -247,14 +259,19 @@ parse_SEQUENCE_START (lyaml_parser *parser)
 static void
 parse_MAPPING_START (lyaml_parser *parser)
 {
-#define EVENTF(_f)	(parser->event.data.mapping_start._f)
+#define EVENTF(_f)	(_f)
    lua_State *L = parser->L;
+	enum fy_node_style nstyle;
+	const char *anchor;
+	const char *tag;
+	bool implicit;
    const char *style;
 
-   switch (EVENTF (style))
+	nstyle = fy_event_get_node_style(parser->event);
+   switch (nstyle)
    {
 #define MENTRY(_s)		\
-      case YAML_##_s##_MAPPING_STYLE: style = #_s; break
+      case FYNS_##_s : style = #_s; break
 
         MENTRY( ANY	);
         MENTRY( BLOCK	);
@@ -262,9 +279,17 @@ parse_MAPPING_START (lyaml_parser *parser)
 #undef MENTRY
 
       default:
-         lua_pushfstring (L, "invalid mapping style %d", EVENTF (style));
+         lua_pushfstring (L, "invalid mapping style %d", nstyle);
          lua_error (L);
    }
+
+	anchor = fy_token_get_text0(parser->event->mapping_start.anchor);
+	if (!anchor)
+		anchor = "";
+	tag = fy_token_get_text0(parser->event->mapping_start.tag);
+	if (!tag)
+		tag = "";
+   implicit = parser->event->mapping_start.mapping_start == NULL;	
 
    parser_push_eventtable (parser, "MAPPING_START", 4);
    RAWSET_EVENTF (anchor);
@@ -277,15 +302,20 @@ parse_MAPPING_START (lyaml_parser *parser)
 static void
 parser_generate_error_message (lyaml_parser *parser)
 {
-   yaml_parser_t *P = &parser->parser;
+   struct fy_parser *P = parser->parser;
    char buf[256];
    luaL_Buffer b;
 
    luaL_buffinit (parser->L, &b);
+#if 0
    luaL_addstring (&b, P->problem ? P->problem : "A problem");
+#else
+   luaL_addstring (&b, "A problem");
+#endif
    snprintf (buf, sizeof (buf), " at document: %d", parser->document_count);
    luaL_addstring (&b, buf);
 
+#if 0
    if (P->problem_mark.line || P->problem_mark.column)
    {
       snprintf (buf, sizeof (buf), ", line: %lu, column: %lu",
@@ -303,6 +333,7 @@ parser_generate_error_message (lyaml_parser *parser)
          (unsigned long) P->context_mark.column + 1);
       luaL_addstring (&b, buf);
    }
+#endif
 
    luaL_pushresult (&b);
 }
@@ -314,22 +345,21 @@ event_iter (lua_State *L)
    char *str;
 
    parser_delete_event (parser);
-   if (yaml_parser_parse (&parser->parser, &parser->event) != 1)
+   parser->event = fy_parser_parse(parser->parser);
+   if (!parser->event)
    {
       parser_generate_error_message (parser);
       return lua_error (L);
    }
 
-   parser->validevent = 1;
-
    lua_newtable    (L);
    lua_pushliteral (L, "type");
 
-   switch (parser->event.type)
+   switch (parser->event->type)
    {
       /* First the simple events, generated right here... */
 #define MENTRY(_s)		\
-      case YAML_##_s##_EVENT: parser_push_eventtable (parser, #_s, 0); break
+      case FYET_##_s : parser_push_eventtable (parser, #_s, 0); break
          MENTRY( STREAM_END	);
          MENTRY( SEQUENCE_END   );
          MENTRY( MAPPING_END	);
@@ -337,7 +367,7 @@ event_iter (lua_State *L)
 
       /* ...then the complex events, generated by a function call. */
 #define MENTRY(_s)		\
-      case YAML_##_s##_EVENT: parse_##_s (parser); break
+      case FYET_##_s : parse_##_s (parser); break
          MENTRY( STREAM_START	);
          MENTRY( DOCUMENT_START	);
          MENTRY( DOCUMENT_END	);
@@ -347,11 +377,11 @@ event_iter (lua_State *L)
          MENTRY( MAPPING_START	);
 #undef MENTRY
 
-      case YAML_NO_EVENT:
+      case FYET_NONE:
          lua_pushnil (L);
          break;
       default:
-         lua_pushfstring  (L, "invalid event %d", parser->event.type);
+         lua_pushfstring  (L, "invalid event %d", parser->event->type);
          return lua_error (L);
    }
 
@@ -366,7 +396,8 @@ parser_gc (lua_State *L)
    if (parser)
    {
       parser_delete_event (parser);
-      yaml_parser_delete (&parser->parser);
+      if (parser->parser)
+         fy_parser_destroy(parser->parser);
    }
    return 0;
 }
@@ -382,6 +413,10 @@ parser_init (lua_State *L)
 int
 Pparser (lua_State *L)
 {
+   static const struct fy_parse_cfg cfg = {
+	.search_path = "",
+	.flags = FYPCF_QUIET | FYPCF_DEBUG_DEFAULT | FYPCF_DEBUG_LEVEL_WARNING,
+   };
    lyaml_parser *parser;
    const unsigned char *str;
 
@@ -399,12 +434,15 @@ Pparser (lua_State *L)
    lua_setmetatable  (L, -2);
 
    /* try to initialize the parser */
-   if (yaml_parser_initialize (&parser->parser) == 0)
+
+   parser->parser = fy_parser_create(&cfg);
+   if (!parser->parser)
       luaL_error (L, "cannot initialize parser for %s", str);
-   yaml_parser_set_input_string (&parser->parser, str, lua_strlen (L, 1));
+   fy_parser_set_string(parser->parser, str, lua_strlen (L, 1));
 
    /* create and return the iterator function, with the loader userdatum as
       its sole upvalue */
    lua_pushcclosure (L, event_iter, 1);
+
    return 1;
 }

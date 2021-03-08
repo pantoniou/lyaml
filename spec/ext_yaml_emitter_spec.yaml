@@ -22,7 +22,7 @@ specify emitting:
          to_raise "invalid stream encoding 'notexists'"
   - it accepts an encoding parameter:
       expect (emitevents (yaml.emitter (), {
-                          {type = "STREAM_START", encoding = "UTF16BE"},
+                          {type = "STREAM_START", encoding = "UTF8"},
                           "STREAM_END"})).
           to_equal (BOM)
 

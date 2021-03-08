@@ -4,9 +4,9 @@ package = 'lyaml'
 version = _MODREV .. _SPECREV
 
 description = {
-   summary  = 'libYAML binding for Lua',
+   summary  = 'libfyaml binding for Lua',
    detailed = 'Read and write YAML format files with Lua.',
-   homepage = 'http://github.com/gvvaughan/lyaml',
+   homepage = 'http://github.com/pantoniou/lyaml',
    license  = 'MIT/X11',
 }
 
@@ -21,7 +21,7 @@ dependencies = {
 
 external_dependencies = {
    YAML = {
-     library = 'yaml',
+     library = 'fyaml-0.6',
    },
 }
 
@@ -53,7 +53,8 @@ if _MODREV == 'git' then
    build.copy_directories = nil
 
    source = {
-      url = 'git://github.com/gvvaughan/lyaml.git',
+      url = 'git://github.com/pantoniou/lyaml.git',
+      branch = "libfyaml",
    }
 end
 

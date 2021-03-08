@@ -21,7 +21,7 @@ defines  = {
 
 external_dependencies   = {
    YAML  = {
-      library = {checksymbol='yaml_document_initialize', library='yaml'},
+      library = {checksymbol='fy_library_version', library='fyaml-0.6'},
    },
 }
 

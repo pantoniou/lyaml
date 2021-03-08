@@ -26,7 +26,7 @@
 #ifndef LYAML_H
 #define LYAML_H 1
 
-#include <yaml.h>
+#include <libfyaml.h>
 
 #include <lua.h>
 #include <lauxlib.h>
@@ -114,7 +114,7 @@
 	lua_pushstring (L, #_k);			\
 	lua_rawget     (L, -2);				\
 	if (!lua_isnil (L, -1)) {			\
-	  _k = (yaml_char_t *) lua_tostring (L, -1);	\
+	  _k = (char *) lua_tostring (L, -1);	\
 	} else { _k = NULL; }
 
 #define RAWGETS_INTEGER(_v, _s)				\
@@ -129,7 +129,7 @@
 	lua_pushstring (L, _s);				\
 	lua_rawget     (L, -2);				\
 	if (!lua_isnil (L, -1)) {			\
-	   _v = (yaml_char_t *) strdup (lua_tostring (L, -1)); \
+	   _v = (char *) strdup (lua_tostring (L, -1)); \
 	} else { _v = NULL; }
 
 #define RAWGET_PUSHTABLE(_k)						\

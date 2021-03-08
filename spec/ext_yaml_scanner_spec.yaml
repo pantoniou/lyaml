@@ -32,9 +32,9 @@ specify scanning:
       expect (k ().end_mark).to_equal {line = 0, column = 0, index = 0}
   - it uses UTF-8 by default:
       expect (k ().encoding).to_be "UTF8"
-  - it recognizes UTF-16 BOM:
-      k = yaml.scanner (BOM .. " BOM")
-      expect (k ().encoding).to_match "UTF16[BL]E"
+#  - it recognizes UTF-16 BOM:
+#      k = yaml.scanner (BOM .. " BOM")
+#      expect (k ().encoding).to_match "UTF16[BL]E"
 
 - describe STREAM_END:
   - before:

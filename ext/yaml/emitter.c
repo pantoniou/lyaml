@@ -24,12 +24,14 @@
  */
 
 #include <assert.h>
+#include <alloca.h>
+#include <stdlib.h>
 
 #include "lyaml.h"
 
 
 typedef struct {
-   yaml_emitter_t   emitter;
+   struct fy_emitter *emitter;
 
    /* output accumulator */
    lua_State	   *outputL;
@@ -46,17 +48,13 @@ typedef struct {
 static int
 emit_STREAM_START (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   yaml_encoding_t yaml_encoding;
+   struct fy_event *fye;
    const char *encoding = NULL;
 
    RAWGET_STRDUP (encoding); lua_pop (L, 1);
 
 #define MENTRY(_s) (STREQ (encoding, #_s)) { yaml_encoding = YAML_##_s##_ENCODING; }
-   if (encoding == NULL) { yaml_encoding = YAML_ANY_ENCODING; } else
-   if MENTRY( UTF8	) else
-   if MENTRY( UTF16LE	) else
-   if MENTRY( UTF16BE	) else
+   if (encoding != NULL && !STREQ(encoding, "UTF8")) 
    {
       emitter->error++;
       luaL_addsize (&emitter->errbuff,
@@ -67,11 +65,11 @@ emit_STREAM_START (lua_State *L, lyaml_emitter *emitter)
 
    if (encoding) free ((void *) encoding);
 
-   if (emitter->error != 0)
-     return 0;
+	if (emitter->error)
+		return -1;
 
-   yaml_stream_start_event_initialize (&event, yaml_encoding);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_STREAM_START));
 }
 
 
@@ -79,9 +77,8 @@ emit_STREAM_START (lua_State *L, lyaml_emitter *emitter)
 static int
 emit_STREAM_END (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   yaml_stream_end_event_initialize (&event);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_STREAM_END));
 }
 
 
@@ -89,10 +86,14 @@ emit_STREAM_END (lua_State *L, lyaml_emitter *emitter)
 static int
 emit_DOCUMENT_START (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   yaml_version_directive_t version_directive, *Pversion_directive = NULL;
-   yaml_tag_directive_t *tag_directives_start = NULL, *tag_directives_end = NULL;
-   int implicit = 0;
+	struct fy_version version_directive;
+   const struct fy_version *Pversion_directive = NULL;
+	int i, tag_count;
+	struct fy_tag **tag_directivesp = NULL, *tag_directives = NULL;
+	char *handle, *prefix, *handlea, *prefixa;
+	int implicit = 1;
+
+	memset(&version_directive, 0, sizeof(version_directive));
 
    RAWGET_PUSHTABLE ("version_directive");
    if (lua_type (L, -1) == LUA_TTABLE)
@@ -111,27 +112,37 @@ emit_DOCUMENT_START (lua_State *L, lyaml_emitter *emitter)
    RAWGET_PUSHTABLE ("tag_directives");
    if (lua_type (L, -1) == LUA_TTABLE)
    {
-      size_t bytes = lua_objlen (L, -1) * sizeof (yaml_tag_directive_t);
+		tag_count = lua_objlen(L, -1);
 
-      tag_directives_start = (yaml_tag_directive_t *) malloc (bytes);
-      tag_directives_end = tag_directives_start;
+		tag_directivesp = alloca((tag_count + 1) * sizeof(*tag_directivesp));
+		tag_directives = alloca(tag_count * sizeof(*tag_directives));
 
       lua_pushnil (L);	/* first key */
+		i = 0;
       while (lua_next (L, -2) != 0)
       {
-         RAWGETS_STRDUP (tag_directives_end->handle, "handle");
+			RAWGET_YAML_CHARP(handle);
          ERROR_IFNIL ("tag_directives item missing key 'handle'");
+			handlea = alloca(strlen(handle) + 1);
+			strcpy(handlea, handle);
          lua_pop (L, 1);	/* pop handle */
 
-         RAWGETS_STRDUP (tag_directives_end->prefix, "prefix");
+			RAWGET_YAML_CHARP(prefix);
          ERROR_IFNIL ("tag_directives item missing key 'prefix'");
+			prefixa = alloca(strlen(prefix) + 1);
+			strcpy(prefixa, prefix);
          lua_pop (L, 1);	/* pop prefix */
 
-         tag_directives_end += 1;
+			tag_directives[i].handle = handlea;
+			tag_directives[i].prefix = prefixa;
 
-         /* pop tag_directives list elewent, leave key for next iteration */
+			tag_directivesp[i] = &tag_directives[i];
+			i++;
+
+         /* pop tag_directives list element, leave key for next iteration */
          lua_pop (L, 1);
       }
+		tag_directivesp[i++]  = NULL;
    }
    lua_pop (L, 1);	/* pop lua_rawget "tag_directives" result */
 
@@ -140,23 +151,23 @@ emit_DOCUMENT_START (lua_State *L, lyaml_emitter *emitter)
    if (emitter->error != 0)
       return 0;
 
-   yaml_document_start_event_initialize (&event, Pversion_directive,
-      tag_directives_start, tag_directives_end, implicit);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_DOCUMENT_START,
+							implicit, Pversion_directive, tag_directivesp));
 }
-
 
 /* Emit a DOCUMENT_END event. */
 static int
 emit_DOCUMENT_END (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   int implicit = 0;
+   int implicit = 0, rc;
+	struct fy_event *fye;
 
    RAWGET_BOOLEAN (implicit);
 
-   yaml_document_end_event_initialize (&event, implicit);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_DOCUMENT_END,
+							implicit));
 }
 
 
@@ -164,16 +175,15 @@ emit_DOCUMENT_END (lua_State *L, lyaml_emitter *emitter)
 static int
 emit_MAPPING_START (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   yaml_mapping_style_t yaml_style;
-   yaml_char_t *anchor = NULL, *tag = NULL;
+   enum fy_node_style yaml_style;
+   char *anchor = NULL, *tag = NULL;
    int implicit = 1;
    const char *style = NULL;
 
    RAWGET_STRDUP (style);  lua_pop (L, 1);
 
-#define MENTRY(_s) (STREQ (style, #_s)) { yaml_style = YAML_##_s##_MAPPING_STYLE; }
-   if (style == NULL) { yaml_style = YAML_ANY_MAPPING_STYLE; } else
+#define MENTRY(_s) (STREQ (style, #_s)) { yaml_style = FYNS_##_s ; }
+   if (style == NULL) { yaml_style = FYNS_ANY; } else
    if MENTRY( BLOCK	) else
    if MENTRY( FLOW	) else
    {
@@ -188,8 +198,11 @@ emit_MAPPING_START (lua_State *L, lyaml_emitter *emitter)
    RAWGET_YAML_CHARP (tag);    lua_pop (L, 1);
    RAWGET_BOOLEAN (implicit);  lua_pop (L, 1);
 
-   yaml_mapping_start_event_initialize (&event, anchor, tag, implicit, yaml_style);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+	(void)implicit;	/* XXX no implicit special */
+
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_MAPPING_START,
+								yaml_style, anchor, tag));
 }
 
 
@@ -197,9 +210,8 @@ emit_MAPPING_START (lua_State *L, lyaml_emitter *emitter)
 static int
 emit_MAPPING_END (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   yaml_mapping_end_event_initialize (&event);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_MAPPING_END));
 }
 
 
@@ -207,16 +219,15 @@ emit_MAPPING_END (lua_State *L, lyaml_emitter *emitter)
 static int
 emit_SEQUENCE_START (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   yaml_sequence_style_t yaml_style;
-   yaml_char_t *anchor = NULL, *tag = NULL;
+   enum fy_node_style yaml_style;
+   char *anchor = NULL, *tag = NULL;
    int implicit = 1;
    const char *style = NULL;
 
    RAWGET_STRDUP (style);  lua_pop (L, 1);
 
-#define MENTRY(_s) (STREQ (style, #_s)) { yaml_style = YAML_##_s##_SEQUENCE_STYLE; }
-   if (style == NULL) { yaml_style = YAML_ANY_SEQUENCE_STYLE; } else
+#define MENTRY(_s) (STREQ (style, #_s)) { yaml_style = FYNS_##_s ; }
+   if (style == NULL) { yaml_style = FYNS_ANY; } else
    if MENTRY( BLOCK	) else
    if MENTRY( FLOW	) else
    {
@@ -231,8 +242,11 @@ emit_SEQUENCE_START (lua_State *L, lyaml_emitter *emitter)
    RAWGET_YAML_CHARP (tag);    lua_pop (L, 1);
    RAWGET_BOOLEAN (implicit);  lua_pop (L, 1);
 
-   yaml_sequence_start_event_initialize (&event, anchor, tag, implicit, yaml_style);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+	(void)implicit;	/* XXX no implicit special */
+
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_SEQUENCE_START,
+								yaml_style, anchor, tag));
 }
 
 
@@ -240,9 +254,8 @@ emit_SEQUENCE_START (lua_State *L, lyaml_emitter *emitter)
 static int
 emit_SEQUENCE_END (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   yaml_sequence_end_event_initialize (&event);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_SEQUENCE_END));
 }
 
 
@@ -250,16 +263,15 @@ emit_SEQUENCE_END (lua_State *L, lyaml_emitter *emitter)
 static int
 emit_SCALAR (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   yaml_scalar_style_t yaml_style;
-   yaml_char_t *anchor = NULL, *tag = NULL, *value;
+   enum fy_scalar_style yaml_style;
+   char *anchor = NULL, *tag = NULL, *value;
    int length = 0, plain_implicit = 1, quoted_implicit = 1;
    const char *style = NULL;
 
    RAWGET_STRDUP (style);  lua_pop (L, 1);
 
-#define MENTRY(_s) (STREQ (style, #_s)) { yaml_style = YAML_##_s##_SCALAR_STYLE; }
-   if (style == NULL) { yaml_style = YAML_ANY_SCALAR_STYLE; } else
+#define MENTRY(_s) (STREQ (style, #_s)) { yaml_style = FYSS_##_s ; }
+   if (style == NULL) { yaml_style = FYSS_ANY; } else
    if MENTRY( PLAIN		) else
    if MENTRY( SINGLE_QUOTED	) else
    if MENTRY( DOUBLE_QUOTED	) else
@@ -279,9 +291,12 @@ emit_SCALAR (lua_State *L, lyaml_emitter *emitter)
    RAWGET_BOOLEAN (plain_implicit);
    RAWGET_BOOLEAN (quoted_implicit);
 
-   yaml_scalar_event_initialize (&event, anchor, tag, value, length,
-      plain_implicit, quoted_implicit, yaml_style);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+	(void)plain_implicit;	/* XXX no such things in libfyaml */
+	(void)quoted_implicit;
+
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_SCALAR,
+								yaml_style, value, FY_NT, anchor, tag));
 }
 
 
@@ -289,13 +304,13 @@ emit_SCALAR (lua_State *L, lyaml_emitter *emitter)
 static int
 emit_ALIAS (lua_State *L, lyaml_emitter *emitter)
 {
-   yaml_event_t event;
-   yaml_char_t *anchor;
+   char *anchor;
 
    RAWGET_YAML_CHARP (anchor);
 
-   yaml_alias_event_initialize (&event, anchor);
-   return yaml_emitter_emit (&emitter->emitter, &event);
+  	return fy_emit_event(emitter->emitter,
+					   fy_emit_event_create(emitter->emitter, FYET_ALIAS,
+								anchor, FY_NT));
 }
 
 
@@ -303,60 +318,62 @@ static int
 emit (lua_State *L)
 {
    lyaml_emitter *emitter;
-   int yaml_ok = 0;
+   int rc = -1;
    int finalize = 0;
+	const char *type;
 
    luaL_argcheck (L, lua_istable (L, 1), 1, "expected table");
 
    emitter = (lyaml_emitter *) lua_touserdata (L, lua_upvalueindex (1));
 
-   {
-     const char *type;
+	RAWGET_STRDUP (type); lua_pop (L, 1);
 
-     RAWGET_STRDUP (type); lua_pop (L, 1);
-
-     if (type == NULL)
-     {
-        emitter->error++;
-        luaL_addstring (&emitter->errbuff, "no type field in event table");
-     }
-#define MENTRY(_s) (STREQ (type, #_s)) { yaml_ok = emit_##_s (L, emitter); }
-     /* Minimize comparisons by putting more common types earlier. */
-     else if MENTRY( SCALAR		)
-     else if MENTRY( MAPPING_START	)
-     else if MENTRY( MAPPING_END	)
-     else if MENTRY( SEQUENCE_START	)
-     else if MENTRY( SEQUENCE_END	)
-     else if MENTRY( DOCUMENT_START	)
-     else if MENTRY( DOCUMENT_END	)
-     else if MENTRY( STREAM_START	)
-     else if MENTRY( STREAM_END		)
-     else if MENTRY( ALIAS		)
+	if (type == NULL)
+	{
+		emitter->error++;
+		luaL_addstring (&emitter->errbuff, "no type field in event table");
+	}
+#define MENTRY(_s) (STREQ (type, #_s)) { rc = emit_##_s (L, emitter); }
+	/* Minimize comparisons by putting more common types earlier. */
+	else if MENTRY( SCALAR		)
+	else if MENTRY( MAPPING_START	)
+	else if MENTRY( MAPPING_END	)
+	else if MENTRY( SEQUENCE_START	)
+	else if MENTRY( SEQUENCE_END	)
+	else if MENTRY( DOCUMENT_START	)
+	else if MENTRY( DOCUMENT_END	)
+	else if MENTRY( STREAM_START	)
+	else if MENTRY( STREAM_END		)
+	else if MENTRY( ALIAS		)
 #undef MENTRY
-     else
-     {
-        emitter->error++;
-        luaL_addsize (&emitter->errbuff,
-                      sprintf (luaL_prepbuffer (&emitter->errbuff),
-                               "invalid event type '%s'", type));
-     }
+	else
+	{
+		emitter->error++;
+		luaL_addsize (&emitter->errbuff,
+						sprintf (luaL_prepbuffer (&emitter->errbuff),
+									 "invalid event type '%s'", type));
+	}
 
-     /* If the stream has finished, finalize the YAML output. */
-     if (type && STREQ (type, "STREAM_END"))
-       finalize = 1;
-
-     if (type) free ((void *) type);
-   }
+	/* If the stream has finished, finalize the YAML output. */
+	if (type && STREQ (type, "STREAM_END"))
+		finalize = 1;
 
    /* Copy any yaml_emitter_t errors into the error buffer. */
-   if (!emitter->error && !yaml_ok)
-   {
+   if (rc)
+	{
+#if 0
       if (emitter->emitter.problem)
         luaL_addstring (&emitter->errbuff, emitter->emitter.problem);
       else
-        luaL_addstring (&emitter->errbuff, "LibYAML call failed");
+#endif
+      luaL_addsize (&emitter->errbuff,
+                    sprintf (luaL_prepbuffer (&emitter->errbuff),
+                             "libfyaml emit failed"));
+
       emitter->error++;
    }
+
+	if (type) free ((void *) type);
 
    /* Report errors back to the caller as `false, "error message"`. */
    if (emitter->error != 0)
@@ -383,12 +400,13 @@ emit (lua_State *L)
 }
 
 
-static int
-append_output (void *arg, unsigned char *buff, size_t len)
+static int append_output(struct fy_emitter *emit, enum fy_emitter_write_type type,
+								 const char *str, int len, void *userdata)
 {
-   lyaml_emitter *emitter = (lyaml_emitter *) arg;
-   luaL_addlstring (&emitter->yamlbuff, (char *) buff, len);
-   return 1;
+   lyaml_emitter *emitter = (lyaml_emitter *) userdata;
+
+   luaL_addlstring (&emitter->yamlbuff, str, len);
+	return len;
 }
 
 
@@ -398,7 +416,7 @@ emitter_gc (lua_State *L)
    lyaml_emitter *emitter = (lyaml_emitter *) lua_touserdata (L, 1);
 
    if (emitter)
-      yaml_emitter_delete (&emitter->emitter);
+		fy_emitter_destroy(emitter->emitter);
 
    return 0;
 }
@@ -408,6 +426,7 @@ int
 Pemitter (lua_State *L)
 {
    lyaml_emitter *emitter;
+	struct fy_emitter_cfg cfg;
 
    lua_newtable (L);	/* object table */
 
@@ -416,15 +435,20 @@ Pemitter (lua_State *L)
    emitter->error = 0;
 
    /* Initialize the emitter. */
-   if (!yaml_emitter_initialize (&emitter->emitter))
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.output = append_output;
+	cfg.userdata = emitter;
+	cfg.flags = FYECF_WIDTH_80 | FYECF_MODE_ORIGINAL | FYECF_INDENT_DEFAULT;
+	emitter->emitter = fy_emitter_create(&cfg);
+   if (!emitter->emitter)
    {
-      if (!emitter->emitter.problem)
-         emitter->emitter.problem = "cannot initialize emitter";
-      return luaL_error (L, "%s", emitter->emitter.problem);
+      return luaL_error (L, "%s", "cannot initialize emitter");
    }
+#if 0
    yaml_emitter_set_unicode (&emitter->emitter, 1);
    yaml_emitter_set_width   (&emitter->emitter, 2);
    yaml_emitter_set_output  (&emitter->emitter, &append_output, emitter);
+#endif
 
    /* Set it's metatable, and ensure it is garbage collected properly. */
    luaL_newmetatable (L, "lyaml.emitter");

@@ -26,10 +26,10 @@ specify parsing:
       expect (e ().end_mark).to_equal {line = 0, column = 0, index = 0}
   - it uses UTF-8 by default:
       expect (e ().encoding).to_be "UTF8"
-  - it recognizes UTF-16 BOM:
-      e = yaml.parser (BOM .. " BOM")
-      expect (e ().encoding).to_match "UTF16[BL]E"
-
+#  - it recognizes UTF-16 BOM:
+#      e = yaml.parser (BOM .. " BOM")
+#      expect (e ().encoding).to_match "UTF16[BL]E"
+#
 - describe STREAM_END:
   - before:
       for t in yaml.parser "nothing to see" do ev = t end
